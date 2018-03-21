@@ -1,0 +1,708 @@
+#setwd("C:/Users/Elka/Desktop/Sleep_project")
+#setwd("C:/Users/nithi/Desktop/Sleep_project")
+
+#installing packages
+#install.packages("readr")
+#install.packages("purrr")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("ggplot2")
+#install.packages("ggfortify")
+#install.packages("Hmisc")
+#install.packages("FSelector") 
+#install.packages("caret") 
+
+#requiring libraries
+library(readr) #read data
+library(purrr) #map functions like lapply
+library(dplyr)
+library(tidyr) #data manipulation
+library(ggplot2) 
+library(ggfortify)
+library(Hmisc) 
+library(FSelector) #feature selection
+library(caret) #ML
+
+data.hom.org <- read_csv("database.csv")
+glimpse(data.hom.org)
+
+# PART 1: Data Cleaning and Preprocessing -----------------------------------
+
+# Cleaning -----------------------------------------
+
+#names(data.hom.org)
+
+#Removing unwanted features 
+data.homicide <- data.hom.org[-c(2, 24)]
+
+#Remove missing information
+sum(is.na(data.homicide))
+
+#There is 1 missing data, so we can just remove the row 
+homicide.data <- data.homicide %>%
+  filter(complete.cases(.))
+
+# Replacing '\\s'(space) with '_'(underscore) in the column names 
+colnames(homicide.data) <- sub("\\s", "_", 
+                               names(homicide.data))
+
+# Preprocessing -----------------------------------------------------------
+
+# Renaming the Race Column
+unique(homicide.data$Perpetrator_Race)
+
+# Rename 'Native American/Alaska Native to just Native Americam
+homicide.data$Perpetrator_Race[
+  homicide.data$Perpetrator_Race %in% 
+    "Native American/Alaska Native"] <- "Native American"
+homicide.data$Victim_Race[
+  homicide.data$Victim_Race %in% 
+    "Native American/Alaska Native"] <- "Native American"
+
+# Tidying the 'Relationship' column ---------------------------------------
+
+unique(homicide.data$Relationship)
+
+#function to clean the 'Relationship' column
+relation.fun <- function(x) {
+  if(x %in% c("Wife", "Girlfriend", "Ex-Wife", "Common-Law Wife")) {
+    vec = "Partner_Female"
+  } else if(x %in% c("Husband", "Boyfriend", "Ex-Husband", 
+                     "Common-Law Husband")) {
+    vec = "Partner_Male"
+  } else if(x %in% c("Father", "Mother", "Stepfather", "Stepmother")) {
+    vec = "Parent"
+  } else if(x %in% c("Son", "Daughter", "Stepson", "Stepdaughter")) {
+    vec = "Child"
+  } else if(x %in% c("Brother", "Sister")) {
+    vec = "Sibling"
+  } else if(x %in% c("Employer", "Employee")) {
+    vec = "Office"
+  } else if (x %in% c("Acquaintance" , "Neighbor", "Friend")) {
+    vec = "Acquaintance"
+  } else if(x %in% c("Family" , "In-Law")) {
+    vec = ("Family")
+  } else {
+    vec = x
+  }
+  return(vec)
+}
+
+rel.ls <- sapply(homicide.data$Relationship, relation.fun)
+unique(rel.ls)
+
+# There is still one entry level in the 'Relationship' column that needs to be resolved 
+# .. i.e. "Boyfriend/Girlfriend" 
+# This can be segregated as either 'Partner_Male' or 'Partner_Female' based on information of... 
+# .. the 'Victim_Sex' column i.e
+
+rel.ls[which(homicide.data$Relationship %in% 
+               "Boyfriend/Girlfriend" & homicide.data$Victim_Sex %in% "Male")
+       ] <- "Partner_Male"
+rel.ls[which(homicide.data$Relationship %in% 
+               "Boyfriend/Girlfriend" & homicide.data$Victim_Sex %in% "Female")
+       ] <- "Partner_Female"
+
+unique(rel.ls)
+which(rel.ls %in% "Boyfriend/Girlfriend")
+
+homicide.data %>% 
+  filter(Record_ID == "274996") %>%
+  select(starts_with("Rel"), contains("tim_Sex"))
+
+# we see that Record_ID 274996 : the Victim's sex was Unknown but relationship to Perpetrator.. 
+#.. is assumed (Boyfriend/Girlfriend), since nothing can be confirmed about the relationship..
+#.. we delete this data point                                     
+
+homicide.data <- homicide.data[-274996,]
+rel.ls <- rel.ls[-274996]
+
+# Tidying the Weapons Column ----------------------------------------------
+
+#function to clean the 'Weapon' column
+weapons.fun <- function(x) {
+  if(x %in% c("Rifle", "Firearm", "Shotgun", "Handgun", "Gun")) {
+    vec = "Firearm"
+  } else if(x %in% c("Strangulation", "Suffocation")) {
+    vec = "Asphyxiation"
+  } else if(x %in% c("Explosives" , "Fire")) {
+    vec = "Explosives" 
+  } else if(x %in% c("Drugs" , "Poison")) {
+    vec = "Toxication" 
+  } else if(x %in% c("Drowning" , "Fall")) {
+    vec = "Drowning/Falling" 
+  } else {
+    vec = x
+  }
+  return(vec)
+}
+
+weap.ls <- sapply(homicide.data$Weapon, weapons.fun)
+unique(weap.ls)
+
+#Restructing with tidied information
+homicide.data %>%
+  mutate(Relationship = rel.ls, Weapon = weap.ls) -> homicide.data
+
+# WE USE THIS DATASET FOR FEATURE SELECTION AND MACHINE LEARNING  
+dim(homicide.data) #(638452, 22)
+
+
+# Tidying the Victim_Age column for Data Visualisation ----------------
+
+Age.data <- homicide.data
+
+range(Age.data$Victim_Age)
+length(which(homicide.data$Victim_Age > 100))
+
+# 974 obs have Victim_Age > 100. In all these cases, the age was wrongly inputed as 998
+# further exploring..
+
+Age.data %>%
+  filter(Victim_Age > 100) %>%
+  #nrow() %>%
+  filter(Victim_Sex %in% "Unknown") %>%
+  nrow()
+
+# there are 720 cases where the Victim_Sex was Unknown and Victim_Age = 998 ..
+# .. for these observations we shall assume Victim_age as NA
+
+ind <- which(Age.data$Victim_Age > 100 & Age.data$Victim_Sex %in% "Unknown")
+Age.data$Victim_Age[ind] <- NA
+
+ind.x <- which(Age.data$Victim_Age > 100 & 
+                 !(Age.data$Victim_Sex == "Unknown"))
+
+# Since Victim_Sex is known but Victim_Age is 998, We need to delete these observations...
+# ..cuz the Age info is errorneous 
+Age.data <- Age.data[-ind.x, ]
+
+#Deleting observations where Perpetrators Age or Victim's Age is 0
+
+sum(Age.data$Perpetrator_Age == 0)
+# 216205 rows have Perpetrator Age as 0, 
+# we filter out these coulumn for plotting
+Age.data %>%
+  filter(!(Perpetrator_Age == 0)) -> Age.data 
+
+sum(Age.data$Victim_Age == 0, na.rm = TRUE)
+# A further 7253 obs have Victim's Age as 0, filtering it out
+Age.data %>%
+  filter(!(Victim_Age == 0)) -> Age.data 
+
+
+# PART 2: Data Visualisation --------------------------------------------------
+
+#install.packages("ggthemes")
+library(ggthemes)
+
+# Perpetrator_Age VS Victim_Age -----------------------------------------------------
+
+spl.1 <- Age.data %>%
+  ggplot(aes(x = Perpetrator_Age, y = Victim_Age))
+
+#install.packages("hexbin")
+library(hexbin)
+
+spl.1 +
+  geom_hex(aes(fill = ..density..)) 
+
+#wrt Relationship to Perpetrator
+spl.1 +
+  geom_hex(aes(fill = ..density..)) +
+  facet_wrap(~ Relationship, ncol = 4) +
+  theme_gdocs()
+
+# wrt Perpetrator_Sex VS Victim_Sex
+
+# Setting names of the facet labels
+lab.V <- c("Male" = "Male_Victim", "Female" = "Female_Victim", 
+           "Unknown" = "Unknown_Victim")
+lab.P <- c("Male" = "Male_Perp", "Female" = "Female_Perp", 
+           "Unknown" = "Unknown_Perp")
+
+spl.1 +
+  geom_hex() +
+  facet_grid(Perpetrator_Sex ~ Victim_Sex, 
+             labeller = labeller(Victim_Sex = lab.V, 
+                                 Perpetrator_Sex = lab.P)) +
+  theme_dark()
+
+
+# Scatter Plot
+
+# wrt Relationship of Victim to Perpetrator
+spl.1 + 
+  geom_point(col = "indianred", alpha = 0.1, shape = 1, size = 1) +
+  geom_smooth() +
+  facet_wrap(~ Relationship, ncol = 4) +
+  theme_tufte()
+
+# wrt Weapon used
+spl.1 +
+  geom_point(col = "darkgreen", alpha = 0.1, shape = 1, size = 1) +
+  facet_wrap(~ Weapon, ncol = 3) +
+  theme_tufte()
+
+# wrt Race of Perpetrator and Victim
+
+#Restructing the dataset. Joining the 'Race' columns into a single one 
+Age.data %>%
+  unite("Perp.Victim_Race", Perpetrator_Race, Victim_Race, 
+        sep = " - ", remove = TRUE) -> Age_Race.data
+
+# wrt Perpetrator's Age
+spl.2a  <- Age_Race.data %>%
+  ggplot(aes(x = factor(Perp.Victim_Race), y = Perpetrator_Age))
+
+spl.2a +
+  geom_count(alpha = 0.1, col = "darksalmon") +
+  coord_flip() +
+  labs(x = "Perpetrator_Race - Victim_Race") +
+  theme_classic()
+
+# wrt Victim's Age
+spl.2b  <- Age_Race.data %>%
+  ggplot(aes(x = factor(Perp.Victim_Race), y = Victim_Age))
+
+spl.2b +
+  geom_count(alpha = 0.1, col = "darkred") +
+  coord_flip() +
+  labs(x = "Perpetrator_Race - Victim_Race") +
+  theme_classic()
+
+
+# Column chart for Perp_race Vs Victim_Race Distribution
+Age_Race.data %>%
+  group_by(Perp.Victim_Race, Crime_Type) %>%
+  summarise(Count = n()) %>%
+  ggplot(aes(x = Perp.Victim_Race, y = Count, fill = Crime_Type)) +
+  geom_col() +
+  coord_flip() +
+  theme_tufte() +
+  theme(legend.position = "None")
+
+# Perperator Race vs Victimn_Race
+gpl.1 <- homicide.data %>%
+  ggplot(aes(x = Perpetrator_Race, y = Victim_Race)) 
+
+
+#HexBin plot
+gpl.1 +
+  geom_bin2d(alpha = 0.7) +
+  theme_tufte() + 
+  theme(axis.text.x = element_text(angle = -10)) 
+
+# Jitter plot
+gpl.1 +
+  geom_jitter(aes(col = Weapon), alpha = 0.5) +
+  scale_color_brewer(palette = "Dark2")
+
+
+# Restructuring data to accomodate Genders of Perp and Victim
+homicide.data %>%
+  unite("Perp.Victim_Sex", Perpetrator_Sex, Victim_Sex, 
+        sep = " - ", remove = TRUE) -> Gender.data
+
+gpl.2 <- Gender.data %>%
+  ggplot(aes(x = Perpetrator_Race, y = Victim_Race)) 
+
+#install.packages("RColorBrewer")
+library(RColorBrewer)
+
+cols <- brewer.pal(9, "Set1")
+col.rng <- colorRampPalette(cols)
+
+gpl.2 +
+  geom_jitter(aes(col = Perp.Victim_Sex), alpha = 0.5) +
+  scale_color_manual(values = col.rng(9)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = -10)) 
+
+
+# Statistical Plot for No. of incidents
+
+# boxplot for Weapons
+homicide.data %>%
+  ggplot(aes(x = Weapon, y = Incident, col = factor(Weapon))) +
+  geom_boxplot() +
+  coord_flip(ylim = c(0, 25))
+
+# we're trying to visualise the incidents by Weapons based on the..
+#.. genders of Victim's and Perpetrators
+# rearranging the data for this purpose
+
+homicide.data %>%
+  group_by(Weapon, Victim_Sex, Perpetrator_Sex) -> weapon.data
+
+
+#Plotting wrt Weapons
+weapon.data %>%
+  ggplot(aes(x = Weapon, y = Incident, col = factor(Weapon))) +
+  stat_summary(geom = "point", fun.y = mean) +
+  stat_summary(geom = "errorbar", fun.ymax = max, fun.ymin = min) +
+  facet_grid(Perpetrator_Sex ~ Victim_Sex, 
+             labeller = labeller(Victim_Sex = lab.V, 
+                                 Perpetrator_Sex = lab.P)) +
+  coord_flip(ylim = c(0, 100))
+
+# This gives us an incorrect representations as the number of observations
+# is not accounted for each category
+
+# Correcting the plot by making the width of the plot represent the 
+#sample size of observations
+weapon.data %>%
+  ggplot(aes(x = Weapon, y = Incident, col = factor(Weapon))) +
+  geom_boxplot(varwidth = TRUE) +
+  facet_grid(Perpetrator_Sex ~ Victim_Sex, 
+             labeller = labeller(Victim_Sex = lab.V, 
+                                 Perpetrator_Sex = lab.P)) +
+  coord_flip(ylim = c(0, 25))
+
+
+# Time-series Analysis ----------------------------------------------------
+homicide.data %>%
+  group_by(Year, Crime_Solved) %>%
+  summarise(Count = n()) -> year.data
+
+year.data %>%
+  ggplot(aes(x = Year, y = Count, col = Crime_Solved)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(1980, 2014, 1)) +
+  labs(y = "Frequency of Incidents") +
+  theme(axis.text.x = element_text(size = 8, angle = 75))
+
+#Pie-chart for Gender distribution of Perpetrator and Victim -----------
+
+#Restructuring the data
+homicide.data %>%
+  unite("Perp.Victim_Sex", Perpetrator_Sex, Victim_Sex, 
+        sep = " - ", remove = TRUE) %>%
+  select(Perp.Victim_Sex) %>%
+  group_by(Perp.Victim_Sex) %>%
+  summarise(Count = n()) %>%
+  mutate(Percent = Count/sum(Count) * 100) -> Gender.data
+
+Gender.data[-2]  
+
+ppl1 <- Gender.data %>%
+  ggplot(aes(x = factor(1), y = Percent, fill = Perp.Victim_Sex))
+
+ppl1 +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  scale_fill_manual(name = "Perpetrator - Victim", values = col.rng(9)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() 
+
+
+# PART 3: Feature Selction ------------------------------------------------
+
+#Source: https://www.cs.waikato.ac.nz/~mhall/thesis.pdf
+
+homicide.df <- homicide.data
+dim(homicide.df)
+
+#Converting character columns to factor
+homicide.df %>%
+  map_if(is.character, as.factor) %>%
+  map(as.numeric) %>% #converting factors to its numeric equivalent 
+  as.data.frame() -> homicide.df
+
+# Removing unwanted features
+homicide.df <- homicide.df[-c(1,2,3,4,8,9,21,22)]
+
+#Removing the crime solved column
+homicide.df %>%
+  select(-Crime_Solved) -> homicide.df
+
+# Removing Year and month info 
+homicide.df %>%
+  select(-c(Year, Month)) -> homicide.df
+
+# Deleting observations with inappropriate Age information
+homicide.df %>%
+  filter(!(Victim_Age > 100 | Victim_Age == 0 | Perpetrator_Age == 0)) -> homicide.df
+
+#install.packages("GGally")
+library(GGally)
+
+#https://briatte.github.io/ggcorr/
+ggcorr(data = homicide.df, low = "blue", mid = "white", high = "darkred",
+       hjust = 0.8, size = 3, layout.exp = 1,
+       label = T, label_alpha = T, label_round = 2, label_size = 3)
+
+# For Perpetrator's Age ------------------------------------------
+frmla <- as.simple.formula(names(homicide.df)[-7], "Perpetrator_Age")
+
+#Using Spearman Rank Correlation for extracting features 
+features_imp <- rank.correlation(formula = frmla, data = homicide.df)
+
+features_imp %>% 
+  as.data.frame() %>%
+  mutate(Features = rownames(.)) %>%
+  arrange(desc(attr_importance)) %>%
+  select(Features, attr_importance) -> features_imp
+
+#Without Perpetrator's Info, the features in ranked order are:-
+features_imp[!grepl("^Perpetrator_.*$", features_imp$Features),]
+
+# If we have Perpetrator's Info, the features in ranked order are:-
+features_imp
+
+# For Perpetrator's Race ------------------------------------
+
+# Filter out info whether Perpetrator Race is "Unknown" for selecting features
+homicide.df %>%
+  filter(!(Perpetrator_Race %in% "Unknown")) -> homicide.df
+
+frmla <- as.simple.formula(names(homicide.df)[-8], "Perpetrator_Race")
+
+# Using Chi-Squared test for filtering features
+features_imp <- chi.squared(formula = frmla, data = homicide.df)
+
+features_imp %>% 
+  as.data.frame() %>%
+  mutate(Features = rownames(.)) %>%
+  arrange(desc(attr_importance)) %>%
+  select(Features, attr_importance) -> features_imp
+
+#Without Perpetrator's Info, the features in ranked order are:-
+features_imp[!grepl("^Perpetrator_.*$", features_imp$Features),]
+
+# If we have Perpetrator's Info, the features in ranked order are:-
+features_imp
+
+
+# PART 4: Machine learning  ------------------------------------------------------------------
+
+# SECTION 1: Predicting Perpetrator's Age ---------------------------------
+predhomicide.df <- homicide.data  
+
+# For prediction purposes we need to isolate all "Unsolved" cases and...
+# ...build our classifier on the "Solved" cases
+predhomicide.df %>%
+  filter(Crime_Solved %in% "Yes") -> predhomicide.df
+
+#Deleting inappropriate Age info
+predhomicide.df %>%
+  filter(!(Victim_Age > 100 | Victim_Age == 0 | Perpetrator_Age == 0)) -> predhomicide.df
+
+dim(predhomicide.df) #dim(413890, 22)
+
+#Examining the variable of interest ------------------------------
+
+#Converting the features to factors
+predhomicide.df %>%
+  map_if(is.character, as.factor) %>%
+  as.data.frame() -> predhomicide.df
+
+ggplot(data = predhomicide.df, aes(x = Perpetrator_Age)) +
+  geom_histogram(binwidth = 0.2, col = "blue", fill = "black")
+
+#Right Skewed
+# So we trim the data to remove Perpetrator Age less than 18 and over 57 years
+predhomicide.df %>%
+  filter(!(Perpetrator_Age > 57 | Perpetrator_Age < 18)) -> predhomicide.df
+
+#we loose roughly:
+dim(predhomicide.df)[1]/413890
+#8.7% of the data 
+
+dim(predhomicide.df)
+
+# Predictive Model: Perpetrator's Age  -------------------------------------------
+
+#Without perpetrator info
+frmla.ageP <- as.simple.formula(c("Victim_Age", "Victim_Sex", "Victim_Race", 
+                                  "Relationship"), class = "Perpetrator_Age")
+
+# 10 fold cross - validation
+model.cv <- train(frmla.ageP, predhomicide.df, 
+                  method = "lm", 
+                  trConTROL = trainControl(
+                    method = "cv", number = 10)
+)
+model.cv
+model.predUS <- model.cv #for predicting unsolved cases
+
+lm.result <- model.cv$results 
+rownames(lm.result) <- "Without Perpetrator Info"
+
+#With Perpetrator info
+frmla.ageP <- as.simple.formula(c("Victim_Age", "Victim_Sex", "Victim_Race", 
+                                  "Relationship",
+                                  "Perpetrator_Race", "Perpetrator_Sex"), 
+                                class = "Perpetrator_Age")
+
+# 10 fold cross - validation
+model.cv <- train(frmla.ageP, predhomicide.df, 
+                  method = "lm", 
+                  trConTROL = trainControl(
+                    method = "cv", number = 10)
+)
+
+model.cv
+
+lm.result <- rbind(lm.result, model.cv$results)
+rownames(lm.result)[2] <- "With Perpetrator Info"
+
+# Out - of sample Error Measures 
+lm.result
+
+# Predicting Perpetrator Age for UnSolved Cases ---------------------------
+
+homicide.data %>%
+  filter(Crime_Solved == "No") %>%
+  ggplot(aes(x = 1, y = Perpetrator_Age)) + 
+  stat_sum(aes(alpha = -Perpetrator_Age))
+
+#Almost all Unsolved cases have Perp's Age as 0, we can use our model 
+# to estimate for these cases
+homicide.data %>%
+  filter(Crime_Solved == "No" & Perpetrator_Age == 0) -> homicideAgeP.df
+
+homicideAgeP.df %>%
+  map_if(is.character, as.factor) %>%
+  as.data.frame() -> homicideAgeP.df
+
+pred <- predict(model.predUS, homicideAgeP.df)
+
+homicideAgeP.df %>%
+  mutate(Perp_NewAge = round(pred)) -> homicideAgeP.df
+
+
+# SECTION 2 Predicting Perpetrator's Race -------------------------------------------
+
+# Data Cleansing --------------------------------------------------------------
+
+predhomicide.df <- homicide.data  
+dim(predhomicide.df)
+
+# For prediction purposes we need to isolate all "Unsolved" cases and...
+# ...build our classifier on the "Solved" cases
+predhomicide.df %>%
+  filter(Crime_Solved %in% "Yes") -> predhomicide.df
+
+#Deleting inappropriate Race info
+#unique(predhomicide.df$Perpetrator_Race)
+
+# Filter out info whether Perpetrator Race is "Unknown" and Victim Race is Unknown
+predhomicide.df %>%
+  filter(!(Perpetrator_Race %in% "Unknown" | 
+             Victim_Race %in% "Unknown")) -> predhomicide.df
+
+#Deleting inappropriate Age info
+predhomicide.df %>%
+  filter(!(Victim_Age > 100 | Victim_Age == 0 | 
+             Perpetrator_Age == 0)) -> predhomicide.df
+
+dim(predhomicide.df)
+
+# Multi-Class Logistic Regression -----------------------------------------
+
+#Function to create a different dataset for each class of 'Perpetrator_Race'.. 
+#..the Dependent variable (Y) is now binary in each dataset     
+RaceCategory <- function(PerpRace.x, frmla, train.df){
+  
+  predhomicide.df %>%
+    mutate(Perpetrator_Race = ifelse(.$Perpetrator_Race %in% PerpRace.x, 
+                                     "Yes", "No")) %>%
+    map_if(is.character, as.factor)
+}
+
+# Logistic Regression Learner for binary classification
+LogRegression <- function(df.x, frmla, test.df){
+  
+  df.x %>%  # df.x is a list
+    as.data.frame() -> df.x 
+  
+  model.lr <- train(frmla, df.x, 
+                    method = "glm", 
+                    family = "binomial")
+  
+  pred <- predict(model.lr, test.df, type = "prob")
+  return(pred)
+}
+
+#Function to compile final classified dataset
+CalcStats <- function(PerpRacePr.ls){
+  #Combining all learner probabilities into single table
+  
+  PerpRacePr_res.df <- data.frame(row.names = 1:nrow(PerpRacePr.ls[[1]])) #Empty df
+  
+  for(i in 1:length(PerpRacePr.ls)){
+    
+    PerpRacePr_res.df <- cbind(PerpRacePr_res.df, PerpRacePr.ls[[i]][["Yes"]])
+  }
+  colnames(PerpRacePr_res.df) <- unique(predhomicide.df$Perpetrator_Race)
+  
+  #We classify Perpetrator_Race based on the race index with max probability
+  PerpRacePr_res.df %>%
+    mutate(idx_max = max.col(.)) %>%
+    mutate(P_Race = unique(predhomicide.df$Perpetrator_Race)[idx_max]) %>%
+    return()
+} 
+
+# Building One vs Rest Classifier -----------------------------------
+
+# Without Perpetrator Information
+frmla.RaceP <- as.simple.formula(c("Victim_Race", "Victim_Ethnicity",
+                                   "State", "Relationship"), 
+                                 class = "Perpetrator_Race")
+
+#Splitting data into train (75%) and test (25%)
+set.seed(12)
+
+samp <- sample(nrow(predhomicide.df))
+predhomicide.df <- predhomicide.df[samp[1:20000], ] #too slow
+split <- round(nrow(predhomicide.df) * 0.75)
+train.df <- predhomicide.df[1:split, ]  
+test.df <- predhomicide.df[(split + 1):nrow(predhomicide.df), ]
+
+dim(train.df) #dim(310851, 22)
+dim(test.df) #dim(102284, 22)
+
+
+#Call 'RaceCategory' function for each 'Perpetrator_Race' class 
+PerpCategory.ls <- lapply(unique(predhomicide.df$Perpetrator_Race), 
+                          FUN = RaceCategory, frmla = frmla.RaceP, 
+                          train.df = train.df)
+
+
+#Calling the Logistic Regression learner function (Log_Regression)..
+#for each 'Perpetrator_Race'-class-type-dataframe/list  
+PerpRacePr.ls <- lapply(PerpCategory.ls, FUN = LogRegression, 
+                        frmla = frmla.RaceP, test.df = test.df)
+
+
+#Call CalcStats
+PerpRacePr_res.df <- CalcStats(PerpRacePr.ls)
+
+# Confusion Matrix --------------------------------------------
+
+cfx <- confusionMatrix(PerpRacePr_res.df$P_Race, test.df$Perpetrator_Race)
+
+cfx$byClass[, c(1,2,7,11)]
+
+
+# Predicting Perpetrator Race for UnSolved Cases ---------------------------
+
+homicide.data %>%
+  filter(Crime_Solved == "No" & Perpetrator_Race %in% "Unknown" &
+           !Victim_Race %in% "Unknown") -> homicideRaceP.df
+
+#Call the Logistic Regression learner function
+PerpRacePr.ls <- lapply(PerpCategory.ls, FUN = LogRegression, 
+                        frmla = frmla.RaceP, test.df = homicideRaceP.df)
+
+#Call CalcStats
+PerpRacePr_res.df <- CalcStats(PerpRacePr.ls)
+
+table(PerpRacePr_res.df$P_Race)
+
+
+
+
+
+
